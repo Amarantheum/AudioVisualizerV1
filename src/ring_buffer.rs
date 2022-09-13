@@ -6,6 +6,7 @@ pub struct RingBuffer {
     buffer: [f32; BUFFER_SIZE / 2],
 }
 
+#[allow(unused)]
 impl RingBuffer {
     pub fn new() -> Self {
         Self {
