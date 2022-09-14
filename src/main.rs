@@ -15,9 +15,10 @@ use graphics::vertex::Vertex;
 use ring_buffer::RingBuffer;
 
 mod system_audio;
-//mod audio_graphics;
+mod audio_graphics;
 mod ring_buffer;
 mod graphics;
+mod audio_processing;
 
 static mut SAMPLE_RATE: f32 = 48000_f32;
 const BUFFER_SIZE: usize = 32768;
