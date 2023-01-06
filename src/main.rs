@@ -1,4 +1,6 @@
-#![windows_subsystem = "windows"]
+#![feature(vec_into_raw_parts)]
+// uncomment for release
+//#![windows_subsystem = "windows"]
 #[macro_use]
 extern crate lazy_static;
 #[macro_use]
@@ -6,13 +8,14 @@ extern crate glium;
 
 use cpal::traits::{HostTrait, StreamTrait};
 use system_audio::capture_output_audio;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use glium::{Surface, VertexBuffer, IndexBuffer};
 use graphics::vertex::Vertex;
 
 //use audio_graphics::waveform::Waveform;
 //use audio_graphics::spectrum::Spectrum;
 use ring_buffer::RingBuffer;
+use graphics::Spectrum;
 
 mod system_audio;
 mod audio_graphics;
@@ -29,9 +32,8 @@ lazy_static! {
 }
 
 fn main() {
-
-    let vertices = [[0.2, 0.1], [0.1, 0.5], [0.2, 0.9], [0.8, 0.9], [0.9, 0.5], [0.8, 0.1]];
-    let indices: [u32; 12] = [0, 1, 2, 0, 2, 3, 0, 3, 4, 0, 4, 5];
+    let vertices = [[-1.0,-1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]];
+    let indices = [0_u32, 1, 2, 3];
 
     let host = cpal::default_host();
     let device = host.default_output_device().expect("no default output device available");
@@ -49,25 +51,44 @@ fn main() {
 
     let vertex_buf = VertexBuffer::new(&display, &Vertex::vertices_from_array(&vertices)[..])
         .expect("Unable to create vertex buffer from given vertices");
-    let index_buf = IndexBuffer::new(&display, glium::index::PrimitiveType::TrianglesList, &indices).unwrap();
-    let vertex_shader_src = r#"
-        #version 140
-        in vec2 pos;
-
-        void main() {
-            gl_Position = vec4(pos, 0.0, 1.0);
-        }
-    "#;
-    let fragment_shader_src = r#"
-        #version 140
-        out vec4 color;
-
-        void main() {
-            color = vec4(1.0, 0.0, 0.0, 1.0);
-        }
-    "#;
+    let index_buf = IndexBuffer::new(&display, glium::index::PrimitiveType::TriangleStrip, &indices).unwrap();
+    let vertex_shader_src = include_str!("graphics/shaders/spectrum.vs").into();
+    let fragment_shader_src = include_str!("graphics/shaders/spectrum.fs").into();
 
     let program = glium::Program::from_source(&display, vertex_shader_src, fragment_shader_src, None).unwrap();
+
+    let mut graphics = Spectrum::new(&display, 48_000, default_window_size[0], default_window_size[1], BUFFER_SIZE);
+    graphics.compute_amplitudes();
+
+    graphics.debug_print_amps();
+    
+    // let mut buffer = glium::uniforms::UniformBuffer::new(&display, SpectrumAmplitude { amps: [[0.0; 4]; 2048] }).unwrap();
+    // {
+    //     let mapping = buffer.map_read();
+    //     println!("HAD: {:?}", &mapping.amps[0..5]);
+    // }
+    // let mut buf_2 = glium::uniforms::UniformBuffer::new(&display, SpectrumData { sample_rate: 48_000 }).unwrap();
+
+    // let data = Vec::new();
+    // let mut buf_3 = glium::uniforms::UniformBuffer::new(&display, data.)
+
+    // let data = vec![[1_f32, 2_f32, 3_f32, 4_f32], [5.0, 6.0, 7.0, 8.0]];
+    // let mut buffer = glium::buffer::Buffer::new(&display, &data[..], glium::buffer::BufferType::ShaderStorageBuffer, glium::buffer::BufferMode::Persistent).unwrap();
+
+    // {
+    //     let mapping = buffer.map_read();
+    //     println!("HAD: {:?}", &*mapping);
+    // }
+    // let compute_shader = glium::program::ComputeShader::from_source(&display, include_str!("graphics/shaders/spectrum.comp")).unwrap();
+    // compute_shader.execute(uniform! {SpectrumOut: &buffer}, 2, 1, 1);
+
+    // {
+    //     let mapping = buffer.map_read();
+    //     println!("GOT: {:?}", &*mapping);
+    // }
+
+
+
     
     event_loop.run(move |event, _, control_flow| {
         let next_frame_time = std::time::Instant::now() +
@@ -103,34 +124,27 @@ fn main() {
 
         let mut target = display.draw();
         target.clear_color(0.0, 0.0, 0.0, 1.0);
-        /*target.draw(&vertex_buffer, &indices, &program, &glium::uniforms::EmptyUniforms,
-                    &Default::default()).unwrap();*/
         target.draw(&vertex_buf, &index_buf, &program, &glium::uniforms::EmptyUniforms,
             &Default::default()).unwrap();
         target.finish().unwrap();
     });
-    //let opengl = OpenGL::V3_2;
-    /*let mut window: Window = WindowSettings::new("Audio Spectrum", window_size)
-        .samples(4)
-        .graphics_api(opengl)
-        .exit_on_esc(true)
-        .decorated(true)
-        .transparent(true)
-        .build()
-        .unwrap();*/
+}
 
-    // uncomment this and comment out the graph definition below to get a waveform visualizer
-    /*let mut graph = Waveform {
-        gl: GlGraphics::new(opengl),
-        radius: 0.5_f64,
-    };*/
-    /*let mut graph = Spectrum::new(GlGraphics::new(opengl), [0.619, 0.733, 1.0, 1.0], 1_f64, 0.015, [1000_f64, 500_f64], 1_f32);
-    //let mut events = Events::new(EventSettings::new());
-    while let Some(e) = events.next(&mut window) {
-        if let Some(args) = e.render_args() {
-            graph.render(&args);
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rustfft::num_complex::Complex;
 
-        if let Some(_args) = e.update_args() {}
-    }*/
+    #[test]
+    fn test_complex_to_float_array() {
+        let a = vec![Complex::<f32>::new(1.0, 2.0), Complex::new(3.0, 4.0), Complex::new(-1.0, std::f32::consts::PI)];
+        println!("init: {:?}", a);
+
+        let (ptr, len, cap) = a.into_raw_parts();
+
+        let b = unsafe {
+            Vec::from_raw_parts(ptr as *mut [f32; 2], len, cap)
+        };
+        println!("final: {:?}", b);
+    }
 }

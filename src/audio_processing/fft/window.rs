@@ -1,14 +1,18 @@
 use std::f32::consts::PI;
 
+pub type RealWindowFn = fn(&mut [f32]);
+
+pub fn null_window_fn(buf: &mut [f32]) {}
+
 pub trait WindowFunction {
     // applies window function to the buffer
-    fn window(buffer: &mut [f32]);
+    fn real_window(buffer: &mut [f32]);
 }
 
 pub struct BlackmanHarris;
 
 impl WindowFunction for BlackmanHarris {
-    fn window(buffer: &mut [f32]) {
+    fn real_window(buffer: &mut [f32]) {
         let size = buffer.len() as f32;
         for i in 0..buffer.len() {
             buffer[i] = buffer[i] * (
@@ -21,3 +25,10 @@ impl WindowFunction for BlackmanHarris {
     }
 }
 
+pub struct Rectangular;
+
+impl WindowFunction for Rectangular {
+    fn real_window(buffer: &mut [f32]) {
+        ()
+    }
+}

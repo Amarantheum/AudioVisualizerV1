@@ -1,0 +1,37 @@
+// computer shader for calculating the height of the spectrum at each x value
+#version 430
+
+layout (local_size_x = 1) in;
+
+layout(std140) buffer SpectrumOut {
+    vec4 amps[];
+};
+
+layout(std140) buffer ComplexIn {
+    vec4 data[];
+};
+
+uniform uint sample_rate;
+uniform float scale;
+uniform uint start_freq;
+uniform uint end_freq;
+
+vec2 get_comp(uint index) {
+    return vec2(data[index / 2][(index & 1) * 2], data[index / 2][(index & 1) * 2 + 1]);
+}
+
+float comp_mag(uint index) {
+    return length(get_comp(index));
+}
+
+float pixel_to_freq(uint pixel) {
+    return 0.0;
+}
+
+float log_calculator(uint x) {
+    return 0.0;
+}
+
+void main() {
+    amps[gl_GlobalInvocationID.x / 4][gl_GlobalInvocationID.x % 4] = log_calculator(gl_GlobalInvocationID.x);
+}
