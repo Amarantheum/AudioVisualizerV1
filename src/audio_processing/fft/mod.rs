@@ -17,7 +17,7 @@ pub struct FftCalculator {
 
 impl FftCalculator {
     pub fn new(size: usize, zero_pad_length: usize) -> Result<Self, Box<dyn Error>> {
-        if (size + zero_pad_length).is_power_of_two() {
+        if !(size + zero_pad_length).is_power_of_two() {
             return Err("failed to create fft calculator because size and zero_pad_length do not add to power of 2".into());
         }
         Ok(
@@ -45,12 +45,43 @@ impl FftCalculator {
             out.push(Complex::<f32>::new(0.0, 0.0));
         }
         self.fft_planner.process(&mut out[..]);
+        
         out
     }
+
+    
 
     /// Get the amount to multiply the magnitude of each frequency bin by based on the amount of zero padding in the calculator
     #[inline]
     pub fn zero_pad_scale_factor(&self) -> f32 {
         (self.size as f32 + self.zero_pad_length as f32) / self.size as f32
+    }
+}
+
+#[inline]
+pub fn complex_to_vec4_arr(mut comp_buf: Vec<Complex<f32>>) -> Vec<[f32; 4]> {
+    if comp_buf.len() & 1 != 0 {
+        comp_buf.push(Complex::new(0.0, 0.0));
+    }
+    let (ptr, len, cap) = comp_buf.into_raw_parts();
+    unsafe {
+        Vec::from_raw_parts(ptr as *mut [f32; 4], len / 2, cap)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_amplitude() {
+        let mut fft = FftCalculator::new(8, 0).unwrap();
+        let mut samples = [-1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1_f32, 1.0];
+        let mut comp_buf = fft.real_fft(&samples[..], window::null_window_fn);
+        let max_amp = comp_buf.iter().map(|x| x.norm()).fold(0.0, |a: f32, b: f32| a.max(b));
+        let max_index = comp_buf.iter().position(|x| x.norm() == max_amp).unwrap();
+        println!("max_amp: {:?}", max_amp);
+        println!("max_index: {:?}", max_index);
+        println!("comp_buf: {:?}", comp_buf);
     }
 }

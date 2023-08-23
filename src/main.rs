@@ -6,11 +6,14 @@ extern crate lazy_static;
 #[macro_use]
 extern crate glium;
 
+use audio_processing::fft::{FftCalculator, window::{BlackmanHarris, WindowFunction}, complex_to_vec4_arr};
 use cpal::traits::{HostTrait, StreamTrait};
+use rustfft::num_complex::ComplexFloat;
 use system_audio::capture_output_audio;
 use parking_lot::Mutex;
 use glium::{Surface, VertexBuffer, IndexBuffer};
 use graphics::vertex::Vertex;
+use plotters::prelude::*;
 
 //use audio_graphics::waveform::Waveform;
 //use audio_graphics::spectrum::Spectrum;
@@ -24,17 +27,39 @@ mod graphics;
 mod audio_processing;
 
 static mut SAMPLE_RATE: f32 = 48000_f32;
-const BUFFER_SIZE: usize = 32768;
+//const BUFFER_SIZE: usize = 32768;
+const BUFFER_SIZE: usize = 64;
 
 lazy_static! {
     static ref AUDIO_BUFFER: Mutex<RingBuffer> = Mutex::new(RingBuffer::new());
     static ref WAVE: Mutex<Vec<f32>> = Mutex::new(Vec::new());
 }
 
+fn draw_line_graph<T>(data: T)
+where T: Into<Iterator<Item = (f32, f32)>>
+{
+    let root_area = BitMapBackend::new("images/2.6.png", (600, 400))
+        .into_drawing_area();
+    root_area.fill(&WHITE).unwrap();
+
+    let mut ctx = ChartBuilder::on(&root_area)
+        .set_label_area_size(LabelAreaPosition::Left, 40)
+        .set_label_area_size(LabelAreaPosition::Bottom, 40)
+        .caption("Scatter Demo", ("sans-serif", 40))
+        .build_cartesian_2d(-10..50, -10..50)
+        .unwrap();
+
+    ctx.configure_mesh().draw().unwrap();
+
+    ctx.draw_series(data.into().iter().map(|point| Circle::new(*point, 5, &RED)))
+        .unwrap();
+}
+
 fn main() {
     let vertices = [[-1.0,-1.0], [-1.0, 1.0], [1.0, -1.0], [1.0, 1.0]];
     let indices = [0_u32, 1, 2, 3];
 
+    // obtain audio stream
     let host = cpal::default_host();
     let device = host.default_output_device().expect("no default output device available");
     let stream = capture_output_audio(&device).unwrap();
@@ -49,15 +74,48 @@ fn main() {
     let cb = glium::glutin::ContextBuilder::new();
     let display = glium::Display::new(wb, cb, &event_loop).unwrap();
 
+    // build vertex and index buffers
     let vertex_buf = VertexBuffer::new(&display, &Vertex::vertices_from_array(&vertices)[..])
         .expect("Unable to create vertex buffer from given vertices");
     let index_buf = IndexBuffer::new(&display, glium::index::PrimitiveType::TriangleStrip, &indices).unwrap();
+    
+    // vertex and fragment shader values
     let vertex_shader_src = include_str!("graphics/shaders/spectrum.vs").into();
     let fragment_shader_src = include_str!("graphics/shaders/spectrum.fs").into();
 
+    // build program from vertex and fragment shaders
     let program = glium::Program::from_source(&display, vertex_shader_src, fragment_shader_src, None).unwrap();
 
-    let mut graphics = Spectrum::new(&display, 48_000, default_window_size[0], default_window_size[1], BUFFER_SIZE);
+    // build a spectrum object that will be used to run calculations using a compute shader
+    // TODO: variable sample rate
+    let mut graphics = Spectrum::new(&display, 48_000_f32, default_window_size[0], default_window_size[1], BUFFER_SIZE as u32);
+    
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    let mut fft_calc = FftCalculator::new(BUFFER_SIZE, 0).unwrap();
+    let mut data = Vec::with_capacity(BUFFER_SIZE);
+    for _ in 0..BUFFER_SIZE {
+        data.push(rand::random::<f32>() * 2.0 - 1.0);
+    }
+    for i in 0..BUFFER_SIZE - 1 {
+        data[i] = (data[i] + data[i + 1]) / 2.0;
+    }
+    for i in 0..BUFFER_SIZE - 1 {
+        data[i] = (data[i] + data[i + 1]) / 2.0;
+    }
+    let comp = fft_calc.real_fft(&data[..], BlackmanHarris::real_window);
+
+    let amps = comp.iter().map(|v| {
+        v.abs()
+    }).collect::<Vec<f32>>();
+    println!("AMPS: {:?}", amps);
+    
+    
+    let comp_buf = graphics.get_mut_comp_buf();
+    println!("buf_size: {:?}", comp_buf.get_size());
+    println!("vec_size: {:?}", std::mem::size_of_val(&comp[..]));
+    comp_buf.write(&complex_to_vec4_arr(comp)[..]);
+
     graphics.compute_amplitudes();
 
     graphics.debug_print_amps();
@@ -101,30 +159,19 @@ fn main() {
                     *control_flow = glutin::event_loop::ControlFlow::Exit;
                     return;
                 },
-                _ => return,
+                _ => (),
             },
-            glutin::event::Event::NewEvents(cause) => match cause {
-                glutin::event::StartCause::ResumeTimeReached { .. } => (),
-                glutin::event::StartCause::Init => (),
-                _ => return,
-            },
-            glutin::event::Event::DeviceEvent { device_id: _, event } => {
-                match event {
-                    glutin::event::DeviceEvent::Key(ki) => {
-                        match ki.scancode {
-                            50 => display.gl_window().window().set_minimized(true),
-                            _ => {},
-                        }
-                    },
-                    _ => {},
-                }
-            }
-            _ => return,
+            _ => (),
         }
 
+        graphics.compute_amplitudes();
         let mut target = display.draw();
         target.clear_color(0.0, 0.0, 0.0, 1.0);
-        target.draw(&vertex_buf, &index_buf, &program, &glium::uniforms::EmptyUniforms,
+        let uniforms = uniform! {
+            SpectrumIn: graphics.get_amp_buf(),
+            resolution: [default_window_size[0], default_window_size[1]],
+        };
+        target.draw(&vertex_buf, &index_buf, &program, &uniforms,
             &Default::default()).unwrap();
         target.finish().unwrap();
     });
