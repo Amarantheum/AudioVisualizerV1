@@ -1,0 +1,74 @@
+// compute shader for calculating the height of the spectrum at each x value
+#version 430
+
+layout (local_size_x = 1) in;
+
+layout(std140) buffer SpectrumOut {
+    vec4 amps[];
+};
+
+layout(std140) buffer ComplexIn {
+    vec4 data[];
+};
+
+layout(std140) buffer PixFreqs {
+    vec4 freq_data[];
+};
+
+uniform float sample_rate;
+uniform float scale;
+uniform uint buf_size;
+uniform uint width;
+
+// get the complex value of the spectrum at the given index
+vec2 get_comp(uint index) {
+    return vec2(data[index / 2][(index & 1) * 2], data[index / 2][(index & 1) * 2 + 1]);
+}
+
+float get_freq_data(uint pixel) {
+    return freq_data[pixel / 4][pixel % 4];
+}
+
+float comp_scaled_mag(uint index) {
+    return length(get_comp(index)) * scale;
+}
+
+float log_comp_scaled_mag(uint index) {
+    float v = comp_scaled_mag(index);
+    if (v < 0.00001) {
+        return -10000000.0;
+    }
+    return log(comp_scaled_mag(index)) / log(10);
+}
+
+float freq_to_bin(float freq) {
+    return freq * float(buf_size) / sample_rate;
+}
+
+float get_pixel_height(uint pixel) {
+    // get the bin of the pixel
+    float bin = freq_to_bin(get_freq_data(pixel));
+    float next_bin = freq_to_bin(get_freq_data(pixel + 1));
+
+    // if current pixel encompasses multiple bins, find max of the bins
+    if (next_bin - bin > 1.0) {
+        float m = log_comp_scaled_mag(uint(bin));
+        for (uint i = uint(bin) + 1; i < uint(next_bin); i++) {
+            m = max(m, log_comp_scaled_mag(i));
+        }
+        return m;
+    }
+
+    // find interpolation between values
+    float y0 = log_comp_scaled_mag(uint(bin));
+    float y1 = log_comp_scaled_mag(uint(bin) + 1);
+    return (y1 - y0) * (bin - floor(bin)) + y0;
+}
+
+void main() {
+    if (gl_GlobalInvocationID.x == width) {
+        amps[gl_GlobalInvocationID.x / 4][gl_GlobalInvocationID.x % 4] = log_comp_scaled_mag(uint(freq_to_bin(get_freq_data(gl_GlobalInvocationID.x))));
+        return;
+    }
+    amps[gl_GlobalInvocationID.x / 4][gl_GlobalInvocationID.x % 4] = get_pixel_height(gl_GlobalInvocationID.x);
+}

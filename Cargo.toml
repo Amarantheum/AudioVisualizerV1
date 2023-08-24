@@ -7,11 +7,10 @@ edition = "2018"
 
 [dependencies]
 rustfft = "6.0.1"
-plotters = "0.3.1"
+plotters = "0.3.5"
 lazy_static = "1.4.0"
 cpal = "0.13"
+egui = "0.22.0"
+eframe = "0.22.0"
 
-piston = "0.53.0"
-piston2d-graphics = "0.40.0"
-pistoncore-glutin_window = "0.69.0"
-piston2d-opengl_graphics = "0.78.0"
+fft_util = { path = "../fft_util" }

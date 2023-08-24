@@ -1,0 +1,16 @@
+// compute shader for calculating the bounds to be filled for each coordinate on the x axis
+#version 430
+
+layout (local_size_x = 1) in;
+
+layout(std430, binding = 0) buffer DataIn {
+    float signal[];
+};
+
+layout(std430, binding = 1) buffer DataOut {
+    vec2 bounds[];
+};
+
+void main() {
+    bounds[gl_GlobalInvocationID.x] = vec2(signal[gl_GlobalInvocationID.x], signal[gl_GlobalInvocationID.x]);
+}
