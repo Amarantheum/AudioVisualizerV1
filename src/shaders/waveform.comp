@@ -11,6 +11,30 @@ layout(std430, binding = 1) buffer DataOut {
     vec2 bounds[];
 };
 
+uniform uint u_signal_length;
+uniform float u_line_width;
+
 void main() {
-    bounds[gl_GlobalInvocationID.x] = vec2(signal[gl_GlobalInvocationID.x], signal[gl_GlobalInvocationID.x]);
+    uint pixels = gl_NumWorkGroups.x;
+    float step_size = float(u_signal_length) / float(pixels);
+    uint lower_index = uint(gl_GlobalInvocationID.x * step_size);
+    uint upper_index = uint((gl_GlobalInvocationID.x + 1) * step_size);
+
+    // if the current pixel is between two points on the signal, then the bounds are the points on the signal
+    if (upper_index == lower_index) {
+        bounds[gl_GlobalInvocationID.x] = vec2(signal[gl_GlobalInvocationID.x] - u_line_width / 2.0, signal[gl_GlobalInvocationID.x] + u_line_width / 2.0);
+        return;
+    }
+    // else, we find the min and max of the signal between the two points
+    float min_value = 1.0;
+    float max_value = -1.0;
+    for (uint i = lower_index; i < upper_index; i++) {
+        if (signal[i] < min_value) {
+            min_value = signal[i];
+        }
+        if (signal[i] > max_value) {
+            max_value = signal[i];
+        }
+    }
+    bounds[gl_GlobalInvocationID.x] = vec2(min_value - u_line_width / 2.0, max_value + u_line_width / 2.0);
 }

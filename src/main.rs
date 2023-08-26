@@ -89,19 +89,19 @@ impl eframe::App for AudioAnalyzerApp {
 
 impl AudioAnalyzerApp {
     fn custom_painting(&mut self, ui: &mut egui::Ui) {
-        let (rect, response) =
-            ui.allocate_exact_size(egui::Vec2::splat(300.0), egui::Sense::drag());
-
-        self.angle += response.drag_delta().x * 0.01;
+        let width = ui.available_width();
+        let height = ui.available_height() / 2.0;
+        let (rect, response) = {
+            ui.allocate_exact_size(egui::Vec2 { x: width, y: height }, egui::Sense::click())
+        };
 
         // Clone locals so we can move them into the paint callback:
-        let angle = self.angle;
         let rotating_triangle = self.rotating_triangle.clone();
 
         let callback = egui::PaintCallback {
             rect,
             callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
-                rotating_triangle.lock().paint(painter.gl(), angle);
+                rotating_triangle.lock().paint(painter.gl(), width as u32);
             })),
         };
         ui.painter().add(callback);
@@ -111,9 +111,12 @@ impl AudioAnalyzerApp {
 struct WaveformGraphics {
     signal_buf: glow::Buffer,
     bound_buf: glow::Buffer,
+    signal_length_loc: glow::UniformLocation,
+    line_width_loc: glow::UniformLocation,
     compute_program: glow::Program,
     program: glow::Program,
     vertex_array: glow::VertexArray,
+    num_pixels_loc: glow::UniformLocation,
 }
 
 impl WaveformGraphics {
@@ -160,6 +163,16 @@ impl WaveformGraphics {
             gl.buffer_data_u8_slice(glow::SHADER_STORAGE_BUFFER, &[0; 32000 * core::mem::size_of::<f32>()], glow::DYNAMIC_COPY);
         }
 
+        let signal_length_loc = unsafe {
+            gl.get_uniform_location(compute_program, "u_signal_length")
+                .expect("Cannot get uniform location")
+        };
+
+        let line_width_loc = unsafe {
+            gl.get_uniform_location(compute_program, "u_line_width")
+                .expect("Cannot get uniform location")
+        };
+
         unsafe {
             let program = gl.create_program().expect("Cannot create program");
 
@@ -202,12 +215,20 @@ impl WaveformGraphics {
                 .create_vertex_array()
                 .expect("Cannot create vertex array");
 
+            let num_pixels_loc = unsafe {
+                gl.get_uniform_location(program, "u_num_pixels")
+                    .expect("Cannot get uniform location")
+            };
+
             Self {
                 signal_buf,
                 bound_buf,
+                signal_length_loc,
+                line_width_loc,
                 compute_program,
                 program,
                 vertex_array,
+                num_pixels_loc,
             }
         }
     }
@@ -221,38 +242,39 @@ impl WaveformGraphics {
         }
     }
 
-    fn paint(&self, gl: &glow::Context, angle: f32) {
+    fn paint(&self, gl: &glow::Context, width: u32) {
         use glow::HasContext as _;
         unsafe {
-            let data: Vec<f32> = vec![0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
-
+            let data_rb = AUDIO_BUFFER.lock();
+            let data = data_rb.get_raw();
             let data_u8: &[u8] = core::slice::from_raw_parts(
                 data.as_ptr() as *const u8,
                 data.len() * core::mem::size_of::<f32>(),
             );
+
             gl.bind_buffer(glow::SHADER_STORAGE_BUFFER, Some(self.signal_buf));
             gl.buffer_sub_data_u8_slice(glow::SHADER_STORAGE_BUFFER, 0, &data_u8);
             gl.use_program(Some(self.compute_program));
             gl.bind_buffer_base(glow::SHADER_STORAGE_BUFFER, 0, Some(self.signal_buf));
             gl.bind_buffer_base(glow::SHADER_STORAGE_BUFFER, 1, Some(self.bound_buf));
-            gl.dispatch_compute(10, 1, 1);
+            gl.uniform_1_u32(Some(&self.signal_length_loc), data.len() as u32);
+            gl.uniform_1_f32(Some(&self.line_width_loc), 0.01_f32);
+            gl.dispatch_compute(width, 1, 1);
             gl.memory_barrier(glow::SHADER_STORAGE_BARRIER_BIT);
+            std::mem::drop(data_rb);
 
-            let mut dst_data: Vec<f32> = vec![0_f32; 30_000];
-            let dst_data_u8: &mut [u8] = core::slice::from_raw_parts_mut(
-                dst_data.as_mut_ptr() as *mut u8,
-                dst_data.len() * core::mem::size_of::<f32>(),
-            );
-            gl.bind_buffer(glow::SHADER_STORAGE_BUFFER, Some(self.bound_buf));
-            gl.get_buffer_sub_data(glow::SHADER_STORAGE_BUFFER, 0, dst_data_u8);
+            // let mut dst_data: Vec<f32> = vec![0_f32; 30_000];
+            // let dst_data_u8: &mut [u8] = core::slice::from_raw_parts_mut(
+            //     dst_data.as_mut_ptr() as *mut u8,
+            //     dst_data.len() * core::mem::size_of::<f32>(),
+            // );
+            // gl.bind_buffer(glow::SHADER_STORAGE_BUFFER, Some(self.bound_buf));
+            // gl.get_buffer_sub_data(glow::SHADER_STORAGE_BUFFER, 0, dst_data_u8);
 
-            println!("dst_data: {:?}", &dst_data[0..20]);
+            //println!("dst_data: {:?}", &dst_data[0..20]);
 
             gl.use_program(Some(self.program));
-            gl.uniform_1_f32(
-                gl.get_uniform_location(self.program, "u_angle").as_ref(),
-                angle,
-            );
+            gl.uniform_1_u32(Some(&self.num_pixels_loc), width);
             gl.bind_buffer_base(glow::SHADER_STORAGE_BUFFER, 1, Some(self.bound_buf));
             gl.bind_vertex_array(Some(self.vertex_array));
             gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
