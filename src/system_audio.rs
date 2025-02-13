@@ -65,7 +65,7 @@ fn wave_reader<T>(samples: &[T])
 where
     T: cpal::Sample + std::fmt::Debug,
 {
-    let mut buffer = AUDIO_BUFFER.lock().unwrap();
+    let mut buffer = AUDIO_BUFFER.lock();
     for i in 0..samples.len() / 2 {
         let avg = (samples[2 * i].to_f32() + samples[2 * i + 1].to_f32()) / 2_f32;
         buffer.push_back(avg);
