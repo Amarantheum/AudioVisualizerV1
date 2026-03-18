@@ -1,5 +1,5 @@
 use cpal::traits::DeviceTrait;
-use cpal;
+use cpal::{self, FromSample, Sample};
 use crate::{AUDIO_BUFFER, SAMPLE_RATE};
 
 pub fn capture_output_audio(device: &cpal::Device) -> Option<cpal::Stream> {
@@ -7,7 +7,7 @@ pub fn capture_output_audio(device: &cpal::Device) -> Option<cpal::Stream> {
         "Capturing audio from: {}",
         device
             .name()
-            .expect("Could not get default audio device name")
+            .unwrap_or_else(|_| "Unknown".to_string())
     );
     let audio_cfg = device
         .default_output_config()
@@ -15,59 +15,51 @@ pub fn capture_output_audio(device: &cpal::Device) -> Option<cpal::Stream> {
     println!("Default audio {:?}", audio_cfg);
     let sample_rate = audio_cfg.sample_rate().0;
     unsafe { SAMPLE_RATE = sample_rate as f32 };
+    
     match audio_cfg.sample_format() {
-        cpal::SampleFormat::F32 => match device.build_input_stream(
-            &audio_cfg.config(),
-            move |data, _: &_| wave_reader::<f32>(data),
-            capture_err_fn,
-        ) {
-            Ok(stream) => Some(stream),
-            Err(e) => {
-                println!("Error capturing f32 audio stream: {}", e);
-                None
-            }
-        },
-        cpal::SampleFormat::I16 => {
-            match device.build_input_stream(
-                &audio_cfg.config(),
-                move |data, _: &_| wave_reader::<i16>(data),
-                capture_err_fn,
-            ) {
-                Ok(stream) => Some(stream),
-                Err(e) => {
-                    println!("Error capturing i16 audio stream: {}", e);
-                    None
-                }
-            }
-        }
-        cpal::SampleFormat::U16 => {
-            match device.build_input_stream(
-                &audio_cfg.config(),
-                move |data, _: &_| wave_reader::<u16>(data),
-                capture_err_fn,
-            ) {
-                Ok(stream) => Some(stream),
-                Err(e) => {
-                    println!("Error capturing u16 audio stream: {}", e);
-                    None
-                }
-            }
+        cpal::SampleFormat::F32 => build_stream::<f32>(device, &audio_cfg.config()),
+        cpal::SampleFormat::I16 => build_stream::<i16>(device, &audio_cfg.config()),
+        cpal::SampleFormat::U16 => build_stream::<u16>(device, &audio_cfg.config()),
+        _ => {
+            println!("Unsupported sample format");
+            None
         }
     }
 }
 
-/// capture_err_fn - called whan it's impossible to build an audio input stream
+fn build_stream<T>(device: &cpal::Device, config: &cpal::StreamConfig) -> Option<cpal::Stream>
+where
+    T: Sample + cpal::SizedSample + 'static,
+    f32: FromSample<T>,
+{
+    match device.build_input_stream(
+        config,
+        move |data: &[T], _: &_| wave_reader(data),
+        capture_err_fn,
+        None,
+    ) {
+        Ok(stream) => Some(stream),
+        Err(e) => {
+            println!("Error capturing audio stream: {}", e);
+            None
+        }
+    }
+}
+
 fn capture_err_fn(err: cpal::StreamError) {
     println!("Error {} building audio input stream", err);
 }
 
 fn wave_reader<T>(samples: &[T])
 where
-    T: cpal::Sample + std::fmt::Debug,
+    T: Sample,
+    f32: FromSample<T>,
 {
     let mut buffer = AUDIO_BUFFER.lock();
     for i in 0..samples.len() / 2 {
-        let avg = (samples[2 * i].to_f32() + samples[2 * i + 1].to_f32()) / 2_f32;
+        let s1: f32 = samples[2 * i].to_sample();
+        let s2: f32 = samples[2 * i + 1].to_sample();
+        let avg = (s1 + s2) / 2.0;
         buffer.push_back(avg);
     }
 }

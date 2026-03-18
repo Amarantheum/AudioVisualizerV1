@@ -29,9 +29,27 @@ impl RingBuffer {
         v
     }
 
+    /// Get the most recent `count` samples (newest first in time order)
+    pub fn get_recent(&self, count: usize) -> Vec<f32> {
+        let count = count.min(BUFFER_SIZE);
+        let mut v = Vec::with_capacity(count);
+        // back points to where next sample will be written, so back-1 is most recent
+        for i in 0..count {
+            let idx = (self.back + BUFFER_SIZE - count + i) & (BUFFER_SIZE - 1);
+            v.push(self.buffer[idx]);
+        }
+        v
+    }
+
     #[allow(unused)]
     pub fn get_raw(&self) -> &[f32] {
         &self.buffer
+    }
+
+    /// Get buffer in raw storage order (for sweep mode display)
+    /// Returns (data, write_position) where write_position is where new data is being written
+    pub fn get_raw_with_position(&self) -> (Vec<f32>, usize) {
+        (self.buffer.to_vec(), self.back)
     }
 }
 

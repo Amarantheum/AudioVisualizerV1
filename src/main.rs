@@ -2,282 +2,261 @@
 extern crate lazy_static;
 
 use cpal::traits::{HostTrait, StreamTrait};
-use system_audio::capture_output_audio;
-use std::sync::Arc;
-use egui::mutex::Mutex;
-use eframe::{egui_glow::{glow, self}, glow::{NativeShader, HasContext}};
+use parking_lot::Mutex;
 
-
-//use audio_graphics::waveform::Waveform;
-//use audio_graphics::spectrum::Spectrum;
 use ring_buffer::RingBuffer;
+use system_audio::capture_output_audio;
 
-mod system_audio;
-//mod audio_graphics;
 mod ring_buffer;
+mod spectrum_renderer;
+mod system_audio;
+mod wgpu_renderer;
 
-static mut SAMPLE_RATE: f32 = 48000_f32;
-const BUFFER_SIZE: usize = 32768;
+use spectrum_renderer::SpectrumRenderer;
+use wgpu_renderer::WaveformRenderer;
+
+pub static mut SAMPLE_RATE: f32 = 48000_f32;
+pub const BUFFER_SIZE: usize = 32768;
+
+#[derive(Clone, PartialEq)]
+pub enum WaveformMode {
+    Scroll,  // Data scrolls from right to left
+    Sweep,   // New data overwrites old, sweep line moves across
+}
+
+#[derive(Clone)]
+pub struct SpectrumSettings {
+    pub fft_size: usize,
+    pub falloff_speed: f32, // dB per second
+    pub vertical_offset: f32, // 0-1 range to shift spectrum up
+}
+
+#[derive(Clone)]
+pub struct WaveformSettings {
+    pub mode: WaveformMode,
+}
+
+impl Default for SpectrumSettings {
+    fn default() -> Self {
+        Self {
+            fft_size: 8192,
+            falloff_speed: 2.0, // 2 dB/s decay
+            vertical_offset: 0.5,
+        }
+    }
+}
+
+impl Default for WaveformSettings {
+    fn default() -> Self {
+        Self {
+            mode: WaveformMode::Scroll,
+        }
+    }
+}
 
 lazy_static! {
-    static ref AUDIO_BUFFER: Mutex<RingBuffer> = Mutex::new(RingBuffer::new());
-    static ref WAVE: Mutex<Vec<f32>> = Mutex::new(Vec::new());
+    pub static ref AUDIO_BUFFER: Mutex<RingBuffer> = Mutex::new(RingBuffer::new());
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let native_options = eframe::NativeOptions::default();
-    eframe::run_native("My egui App", native_options, Box::new(|cc| Box::new(AudioAnalyzerApp::new(cc))))?;
-    Ok(())
+fn main() -> Result<(), eframe::Error> {
+    env_logger::init();
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1200.0, 800.0])
+            .with_title("Audio Visualizer"),
+        renderer: eframe::Renderer::Wgpu,
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "Audio Visualizer",
+        options,
+        Box::new(|cc| Box::new(AudioVisualizerApp::new(cc))),
+    )
 }
 
-struct AudioAnalyzerApp {
-    audio_host: cpal::Host,
-    audio_device: cpal::Device,
-    audio_stream: cpal::Stream,
-
-    rotating_triangle: Arc<Mutex<WaveformGraphics>>,
-    angle: f32,
+struct AudioVisualizerApp {
+    _audio_stream: cpal::Stream,
+    waveform_renderer: Option<WaveformRenderer>,
+    spectrum_renderer: Option<SpectrumRenderer>,
+    wgpu_render_state: Option<eframe::egui_wgpu::RenderState>,
+    spectrum_settings: SpectrumSettings,
+    waveform_settings: WaveformSettings,
+    last_frame_time: std::time::Instant,
+    show_settings: bool,
 }
 
-impl AudioAnalyzerApp {
+impl AudioVisualizerApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Customize egui here with cc.egui_ctx.set_fonts and cc.egui_ctx.set_visuals.
-        // Restore app state using cc.storage (requires the "persistence" feature).
-        // Use the cc.gl (a glow::Context) to create graphics shaders and buffers that you can use
-        // for e.g. egui::PaintCallback.
-
-        // set up audio stream
+        // Set up audio stream
         let host = cpal::default_host();
-        let device = host.default_output_device().expect("no default output device available");
-        let stream = capture_output_audio(&device).unwrap();
-        stream.play().unwrap();
+        let device = host
+            .default_output_device()
+            .expect("No default output device available");
+        let stream = capture_output_audio(&device).expect("Failed to capture audio");
+        stream.play().expect("Failed to play stream");
 
-        let gl = cc
-            .gl
-            .as_ref()
-            .expect("You need to run eframe with the glow backend");
-        Self {
-            audio_host: host,
-            audio_device: device,
-            audio_stream: stream,
+        let spectrum_settings = SpectrumSettings::default();
 
-            rotating_triangle: Arc::new(Mutex::new(WaveformGraphics::new(gl))),
-            angle: 0.0,
-        }
-    }
-}
-
-impl eframe::App for AudioAnalyzerApp {
-   fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                ui.label("The triangle is being painted using ");
-                ui.hyperlink_to("glow", "https://github.com/grovesNL/glow");
-                ui.label(" (OpenGL).");
-            });
-
-            egui::Frame::canvas(ui.style()).show(ui, |ui| {
-                self.custom_painting(ui);
-            });
-            ui.label("Drag to rotate!");
-        });
-
-       ctx.request_repaint();
-   }
-}
-
-impl AudioAnalyzerApp {
-    fn custom_painting(&mut self, ui: &mut egui::Ui) {
-        let width = ui.available_width();
-        let height = ui.available_height() / 2.0;
-        let (rect, response) = {
-            ui.allocate_exact_size(egui::Vec2 { x: width, y: height }, egui::Sense::click())
-        };
-
-        // Clone locals so we can move them into the paint callback:
-        let rotating_triangle = self.rotating_triangle.clone();
-
-        let callback = egui::PaintCallback {
-            rect,
-            callback: std::sync::Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
-                rotating_triangle.lock().paint(painter.gl(), width as u32);
-            })),
-        };
-        ui.painter().add(callback);
-    }
-}
-
-struct WaveformGraphics {
-    signal_buf: glow::Buffer,
-    bound_buf: glow::Buffer,
-    signal_length_loc: glow::UniformLocation,
-    line_width_loc: glow::UniformLocation,
-    compute_program: glow::Program,
-    program: glow::Program,
-    vertex_array: glow::VertexArray,
-    num_pixels_loc: glow::UniformLocation,
-}
-
-impl WaveformGraphics {
-    fn new(gl: &glow::Context) -> Self {
-        use glow::HasContext as _;
-
-        let compute_program = unsafe {
-            let compute_program = gl.create_program().expect("Cannot create program");
-
-            let shader_source = include_str!("./shaders/waveform.comp");
-            let shader = gl.create_shader(glow::COMPUTE_SHADER).expect("Cannot create shader");
-            gl.shader_source(shader, shader_source);
-            // compile shader
-            gl.compile_shader(shader);
-            // check status of compile
-            if !gl.get_shader_compile_status(shader) {
-                panic!("Failed to compile compute shader: {}", gl.get_shader_info_log(shader));
-            }
-            gl.attach_shader(compute_program, shader);
-            // link program
-            gl.link_program(compute_program);
-            // check status of link
-            if !gl.get_program_link_status(compute_program) {
-                panic!("Failed to link compute program: {}", gl.get_program_info_log(compute_program));
-            }
-            gl.detach_shader(compute_program, shader);
-            gl.delete_shader(shader);
-
-            compute_program
-        };
-
-        let signal_buf = unsafe { gl.create_buffer().expect("failed to create wf_signal_buf") };
-        let bound_buf = unsafe { gl.create_buffer().expect("failed to create wf_bound_buf") };
-        
-        // TODO: algorithms to decrease the gpu memory footprint
-        unsafe {
-            gl.bind_buffer(glow::SHADER_STORAGE_BUFFER, Some(signal_buf));
-            // DYNAMIC_DRAW because we are reusing the buffer and writing from app to GL but not writing
-            // size of 65536 because the plan is to not support more than 65536 samples for the size of the audio buffer
-            gl.buffer_data_u8_slice(glow::SHADER_STORAGE_BUFFER, &[0; 2_usize.pow(16) * core::mem::size_of::<f32>()], glow::DYNAMIC_DRAW);
-            gl.bind_buffer(glow::SHADER_STORAGE_BUFFER, Some(bound_buf));
-            // DYNAMIC_COPY because we are reusing the buffer and everything else occurs in GL
-            // size of 32000 because the plan is to not support more than 16000 pixels for the size of the window (16000 * 2 (upper and lower bound) = 32000)
-            gl.buffer_data_u8_slice(glow::SHADER_STORAGE_BUFFER, &[0; 32000 * core::mem::size_of::<f32>()], glow::DYNAMIC_COPY);
-        }
-
-        let signal_length_loc = unsafe {
-            gl.get_uniform_location(compute_program, "u_signal_length")
-                .expect("Cannot get uniform location")
-        };
-
-        let line_width_loc = unsafe {
-            gl.get_uniform_location(compute_program, "u_line_width")
-                .expect("Cannot get uniform location")
-        };
-
-        unsafe {
-            let program = gl.create_program().expect("Cannot create program");
-
-            let shader_sources = [
-                (glow::VERTEX_SHADER, include_str!("./shaders/waveform.vs"),),
-                (glow::FRAGMENT_SHADER, include_str!("./shaders/waveform.fs")),
-            ];
-
-            let shaders: Vec<_> = shader_sources
-                .iter()
-                .map(|(shader_type, shader_source)| {
-                    let shader = gl
-                        .create_shader(*shader_type)
-                        .expect("Cannot create shader");
-                    gl.shader_source(shader, &shader_source);
-                    gl.compile_shader(shader);
-                    assert!(
-                        gl.get_shader_compile_status(shader),
-                        "Failed to compile {shader_type}: {}",
-                        gl.get_shader_info_log(shader)
-                    );
-                    gl.attach_shader(program, shader);
-                    shader
-                })
-                .collect();
-
-            gl.link_program(program);
-            assert!(
-                gl.get_program_link_status(program),
-                "{}",
-                gl.get_program_info_log(program)
-            );
-
-            for shader in shaders {
-                gl.detach_shader(program, shader);
-                gl.delete_shader(shader);
-            }
-
-            let vertex_array = gl
-                .create_vertex_array()
-                .expect("Cannot create vertex array");
-
-            let num_pixels_loc = unsafe {
-                gl.get_uniform_location(program, "u_num_pixels")
-                    .expect("Cannot get uniform location")
+        // Initialize wgpu renderers
+        let (waveform_renderer, spectrum_renderer, wgpu_render_state) = 
+            if let Some(render_state) = cc.wgpu_render_state.clone() {
+                let device = &render_state.device;
+                (
+                    Some(WaveformRenderer::new(device)),
+                    Some(SpectrumRenderer::new(device, spectrum_settings.fft_size)),
+                    Some(render_state),
+                )
+            } else {
+                (None, None, None)
             };
 
-            Self {
-                signal_buf,
-                bound_buf,
-                signal_length_loc,
-                line_width_loc,
-                compute_program,
-                program,
-                vertex_array,
-                num_pixels_loc,
+        Self {
+            _audio_stream: stream,
+            waveform_renderer,
+            spectrum_renderer,
+            wgpu_render_state,
+            spectrum_settings,
+            waveform_settings: WaveformSettings::default(),
+            last_frame_time: std::time::Instant::now(),
+            show_settings: false,
+        }
+    }
+
+    fn draw_waveform(&mut self, ui: &mut egui::Ui) {
+        let available_size = ui.available_size();
+        let width = available_size.x.max(1.0) as u32;
+        let height = available_size.y.max(1.0) as u32;
+        let sweep_mode = self.waveform_settings.mode == WaveformMode::Sweep;
+
+        if let (Some(renderer), Some(render_state)) = 
+            (&mut self.waveform_renderer, &self.wgpu_render_state) 
+        {
+            // Render to texture
+            if let Some(pixels) = renderer.render_to_pixels(&render_state.device, &render_state.queue, width, height, sweep_mode) {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [width as usize, height as usize],
+                    &pixels,
+                );
+                let texture = ui.ctx().load_texture(
+                    "waveform_texture",
+                    image,
+                    egui::TextureOptions::LINEAR,
+                );
+                ui.image(&texture);
             }
         }
     }
 
-    fn destroy(&self, gl: &glow::Context) {
-        use glow::HasContext as _;
-        unsafe {
-            gl.delete_program(self.compute_program);
-            gl.delete_program(self.program);
-            gl.delete_vertex_array(self.vertex_array);
+    fn draw_spectrum(&mut self, ui: &mut egui::Ui, dt: f32) {
+        let available_size = ui.available_size();
+        let width = available_size.x.max(1.0) as u32;
+        let height = available_size.y.max(1.0) as u32;
+
+        if let (Some(renderer), Some(render_state)) = 
+            (&mut self.spectrum_renderer, &self.wgpu_render_state) 
+        {
+            // Render to texture with falloff
+            if let Some(pixels) = renderer.render_to_pixels(
+                &render_state.device, 
+                &render_state.queue, 
+                width, 
+                height,
+                self.spectrum_settings.falloff_speed,
+                dt,
+                self.spectrum_settings.vertical_offset,
+            ) {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [width as usize, height as usize],
+                    &pixels,
+                );
+                let texture = ui.ctx().load_texture(
+                    "spectrum_texture",
+                    image,
+                    egui::TextureOptions::LINEAR,
+                );
+                ui.image(&texture);
+            }
         }
     }
 
-    fn paint(&self, gl: &glow::Context, width: u32) {
-        use glow::HasContext as _;
-        unsafe {
-            let data_rb = AUDIO_BUFFER.lock();
-            let data = data_rb.get_raw();
-            let data_u8: &[u8] = core::slice::from_raw_parts(
-                data.as_ptr() as *const u8,
-                data.len() * core::mem::size_of::<f32>(),
-            );
+    fn draw_settings(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("FFT Size:");
+            egui::ComboBox::from_id_source("fft_size")
+                .selected_text(format!("{}", self.spectrum_settings.fft_size))
+                .show_ui(ui, |ui| {
+                    for &size in &[1024, 2048, 4096, 8192, 16384, 32768] {
+                        if ui.selectable_value(&mut self.spectrum_settings.fft_size, size, format!("{}", size)).changed() {
+                            // Recreate spectrum renderer with new FFT size
+                            if let Some(render_state) = &self.wgpu_render_state {
+                                self.spectrum_renderer = Some(SpectrumRenderer::new(&render_state.device, size));
+                            }
+                        }
+                    }
+                });
+        });
 
-            gl.bind_buffer(glow::SHADER_STORAGE_BUFFER, Some(self.signal_buf));
-            gl.buffer_sub_data_u8_slice(glow::SHADER_STORAGE_BUFFER, 0, &data_u8);
-            gl.use_program(Some(self.compute_program));
-            gl.bind_buffer_base(glow::SHADER_STORAGE_BUFFER, 0, Some(self.signal_buf));
-            gl.bind_buffer_base(glow::SHADER_STORAGE_BUFFER, 1, Some(self.bound_buf));
-            gl.uniform_1_u32(Some(&self.signal_length_loc), data.len() as u32);
-            gl.uniform_1_f32(Some(&self.line_width_loc), 0.01_f32);
-            gl.dispatch_compute(width, 1, 1);
-            gl.memory_barrier(glow::SHADER_STORAGE_BARRIER_BIT);
-            std::mem::drop(data_rb);
+        ui.horizontal(|ui| {
+            ui.label("Falloff (dB/s):");
+            ui.add(egui::Slider::new(&mut self.spectrum_settings.falloff_speed, 0.0..=10.0));
+        });
 
-            // let mut dst_data: Vec<f32> = vec![0_f32; 30_000];
-            // let dst_data_u8: &mut [u8] = core::slice::from_raw_parts_mut(
-            //     dst_data.as_mut_ptr() as *mut u8,
-            //     dst_data.len() * core::mem::size_of::<f32>(),
-            // );
-            // gl.bind_buffer(glow::SHADER_STORAGE_BUFFER, Some(self.bound_buf));
-            // gl.get_buffer_sub_data(glow::SHADER_STORAGE_BUFFER, 0, dst_data_u8);
+        ui.horizontal(|ui| {
+            ui.label("Vertical Offset:");
+            ui.add(egui::Slider::new(&mut self.spectrum_settings.vertical_offset, 0.0..=1.0));
+        });
 
-            //println!("dst_data: {:?}", &dst_data[0..20]);
+        ui.separator();
 
-            gl.use_program(Some(self.program));
-            gl.uniform_1_u32(Some(&self.num_pixels_loc), width);
-            gl.bind_buffer_base(glow::SHADER_STORAGE_BUFFER, 1, Some(self.bound_buf));
-            gl.bind_vertex_array(Some(self.vertex_array));
-            gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-        }
+        ui.horizontal(|ui| {
+            ui.label("Waveform Mode:");
+            ui.selectable_value(&mut self.waveform_settings.mode, WaveformMode::Scroll, "Scroll");
+            ui.selectable_value(&mut self.waveform_settings.mode, WaveformMode::Sweep, "Sweep");
+        });
+    }
+}
+
+impl eframe::App for AudioVisualizerApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Calculate delta time
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(self.last_frame_time).as_secs_f32();
+        self.last_frame_time = now;
+
+        // Settings panel
+        egui::TopBottomPanel::top("settings_bar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.toggle_value(&mut self.show_settings, "⚙ Settings");
+                if self.show_settings {
+                    ui.separator();
+                    self.draw_settings(ui);
+                }
+            });
+        });
+
+        // Top panel for waveform
+        egui::TopBottomPanel::top("waveform_panel")
+            .resizable(true)
+            .default_height(ctx.screen_rect().height() / 2.0)
+            .min_height(100.0)
+            .show(ctx, |ui| {
+                ui.heading("Waveform");
+                egui::Frame::canvas(ui.style()).show(ui, |ui| {
+                    self.draw_waveform(ui);
+                });
+            });
+
+        // Bottom panel for spectrum
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("Spectrum Analyzer");
+            egui::Frame::canvas(ui.style()).show(ui, |ui| {
+                self.draw_spectrum(ui, dt);
+            });
+        });
+
+        // Request repaint at ~60fps instead of as fast as possible
+        ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
 }
